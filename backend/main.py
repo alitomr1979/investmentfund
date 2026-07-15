@@ -242,3 +242,79 @@ def get_fee_ledger(skip: int = 0, limit: int = 100, db: Session = Depends(get_db
 @app.get("/users/{user_id}/fees", response_model=list[schemas.FeeLedgerResponse])
 def get_user_fees(user_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.FeeLedger).filter(models.FeeLedger.user_id == user_id).order_by(models.FeeLedger.id.desc()).offset(skip).limit(limit).all()
+
+@app.get("/reports/investors-summary", response_model=schemas.InvestorsSummaryResponse)
+def get_investors_summary(db: Session = Depends(get_db)):
+    import datetime
+    from dateutil.relativedelta import relativedelta
+    
+    now = datetime.datetime.utcnow()
+    date_3m = now - relativedelta(months=3)
+    date_1y = now - relativedelta(years=1)
+    
+    def get_units_at_date(investor_id, target_date):
+        deposits = db.query(models.Transaction).filter(models.Transaction.user_id == investor_id, models.Transaction.transaction_type == "deposit", models.Transaction.effective_date <= target_date).all()
+        withdrawals = db.query(models.Transaction).filter(models.Transaction.user_id == investor_id, models.Transaction.transaction_type == "withdrawal", models.Transaction.effective_date <= target_date).all()
+        fees = db.query(models.FeeLedger).filter(models.FeeLedger.user_id == investor_id, models.FeeLedger.created_at <= target_date).all()
+        total = sum(d.units_transacted for d in deposits) - sum(w.units_transacted for w in withdrawals) - sum(f.units_transferred for f in fees)
+        return Decimal(str(total)) if total else Decimal("0.0")
+
+    def get_nav_at_date(target_date):
+        status = db.query(models.FundStatus).filter(models.FundStatus.last_updated <= target_date).order_by(models.FundStatus.id.desc()).first()
+        if status:
+            return status.nav_per_unit
+        first_status = db.query(models.FundStatus).order_by(models.FundStatus.id.asc()).first()
+        return first_status.nav_per_unit if first_status else Decimal("100.0")
+
+    def calculate_dietz(investor_id, start_date, end_date, v_end):
+        v_start = get_units_at_date(investor_id, start_date) * get_nav_at_date(start_date)
+        cash_flows = db.query(models.Transaction).filter(
+            models.Transaction.user_id == investor_id,
+            models.Transaction.effective_date > start_date,
+            models.Transaction.effective_date <= end_date
+        ).all()
+        
+        net_cf = Decimal("0.0")
+        weighted_cf = Decimal("0.0")
+        total_days = Decimal(max((end_date - start_date).days, 1))
+        
+        for cf in cash_flows:
+            amount = cf.amount_fiat if cf.transaction_type == "deposit" else -cf.amount_fiat
+            net_cf += amount
+            weight = Decimal(max((end_date - cf.effective_date).days, 0)) / total_days
+            weighted_cf += amount * weight
+            
+        denominator = v_start + weighted_cf
+        if denominator == Decimal("0.0"):
+            return Decimal("0.0")
+        return (v_end - v_start - net_cf) / denominator
+
+    current_nav = get_nav_at_date(now)
+    nav_3m = get_nav_at_date(date_3m)
+    nav_1y = get_nav_at_date(date_1y)
+    
+    fund_gross_3m = (current_nav / nav_3m) - Decimal("1.0") if nav_3m > Decimal("0.0") else Decimal("0.0")
+    fund_gross_1y = (current_nav / nav_1y) - Decimal("1.0") if nav_1y > Decimal("0.0") else Decimal("0.0")
+    
+    investors = db.query(models.User).filter(models.User.role == "investor").all()
+    summary_list = []
+    
+    for inv in investors:
+        current_amount = inv.total_units * current_nav
+        net_return_3m = calculate_dietz(inv.id, date_3m, now, current_amount)
+        net_return_1y = calculate_dietz(inv.id, date_1y, now, current_amount)
+        
+        summary_list.append({
+            "investor_name": inv.name,
+            "total_amount": current_amount,
+            "last_quarter": {
+                "fund_gross_return": fund_gross_3m,
+                "investor_net_return": net_return_3m
+            },
+            "last_year": {
+                "fund_gross_return": fund_gross_1y,
+                "investor_net_return": net_return_1y
+            }
+        })
+        
+    return {"summary": summary_list}

@@ -65,3 +65,16 @@ class FeeLedgerResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class PeriodPerformance(BaseModel):
+    fund_gross_return: Decimal
+    investor_net_return: Decimal
+
+class InvestorSummary(BaseModel):
+    investor_name: str
+    total_amount: Decimal
+    last_quarter: PeriodPerformance
+    last_year: PeriodPerformance
+
+class InvestorsSummaryResponse(BaseModel):
+    summary: list[InvestorSummary]
