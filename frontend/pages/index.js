@@ -3,6 +3,8 @@ import { useState, useEffect } from 'react';
 
 export default function Dashboard({ user, fundStatus, reload, onLogout, API_BASE }) {
   const [newAum, setNewAum] = useState('');
+  const [effectiveDate, setEffectiveDate] = useState(new Date().toISOString().split('T')[0]);
+  const [showModal, setShowModal] = useState(false);
   const [updatingAum, setUpdatingAum] = useState(false);
   const [summaryData, setSummaryData] = useState([]);
   const [loadingSummary, setLoadingSummary] = useState(true);
@@ -31,9 +33,10 @@ export default function Dashboard({ user, fundStatus, reload, onLogout, API_BASE
       await fetch(`${API_BASE}/fund-status/update-value`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ total_value: newAum })
+        body: JSON.stringify({ total_value: newAum, effective_date: effectiveDate })
       });
       setNewAum('');
+      setShowModal(false);
       reload();
     } catch (err) {
       alert('Error updating AUM');
@@ -53,26 +56,34 @@ export default function Dashboard({ user, fundStatus, reload, onLogout, API_BASE
         </div>
         
         {user.role === 'admin' && (
-          <form onSubmit={handleUpdateAUM} className="glass-panel" style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end', padding: '1rem' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Update Global AUM (Fiat)</label>
-              <input 
-                className="input" 
-                style={{ marginBottom: 0, padding: '0.5rem' }} 
-                type="number" 
-                step="0.01" 
-                required 
-                value={newAum} 
-                onChange={e=>setNewAum(e.target.value)} 
-                placeholder="New total value..."
-              />
-            </div>
-            <button className="btn btn-success" disabled={updatingAum} style={{ padding: '0.5rem 1.5rem' }}>
-              {updatingAum ? 'Updating...' : 'Update AUM'}
-            </button>
-          </form>
+          <button className="btn btn-success" onClick={() => setShowModal(true)}>Update AUM</button>
         )}
       </div>
+
+      {showModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div className="glass-panel" style={{ width: '400px', padding: '2rem' }}>
+            <h2 style={{ marginTop: 0 }}>Update Global AUM</h2>
+            <form onSubmit={handleUpdateAUM}>
+              <div className="form-group" style={{ marginBottom: '1rem' }}>
+                <label>Total AUM ($)</label>
+                <input className="input" type="number" step="0.01" required value={newAum} onChange={e=>setNewAum(e.target.value)} />
+              </div>
+              <div className="form-group" style={{ marginBottom: '1.5rem' }}>
+                <label>Effective Date</label>
+                <input className="input" type="date" required value={effectiveDate} onChange={e=>setEffectiveDate(e.target.value)} />
+              </div>
+              <div style={{ display: 'flex', gap: '1rem' }}>
+                <button type="button" className="btn" style={{ flex: 1, background: 'var(--glass-border)' }} onClick={() => setShowModal(false)} disabled={updatingAum}>Cancel</button>
+                <button type="submit" className="btn btn-success" style={{ flex: 1 }} disabled={updatingAum}>
+                  {updatingAum ? 'Updating...' : 'Submit'}
+                </button>
+              </div>
+              {updatingAum && <p className="text-muted" style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.9rem' }}>Actualizando NAV y Calculando Comisiones...</p>}
+            </form>
+          </div>
+        </div>
+      )}
 
       <div className="grid-3">
         <div className="glass-panel stat-card">
@@ -108,7 +119,7 @@ export default function Dashboard({ user, fundStatus, reload, onLogout, API_BASE
               </thead>
               <tbody>
                 {summaryData.length === 0 ? (
-                  <tr><td colSpan="6" style={{ padding: '1rem 0', color: 'var(--text-muted)' }}>No investors found.</td></tr>
+                  <tr><td colSpan="6" style={{ padding: '1rem 0', color: 'var(--text-muted)' }}>No investors found or waiting for data.</td></tr>
                 ) : summaryData.map((inv, i) => (
                   <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                     <td style={{ padding: '1rem 0', fontWeight: 600 }}>{inv.investor_name}</td>

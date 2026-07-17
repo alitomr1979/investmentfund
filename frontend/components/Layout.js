@@ -8,7 +8,8 @@ export default function Layout({ children, user, onLogout }) {
     { name: 'Dashboard', path: '/' },
     { name: 'Transactions', path: '/transactions' },
     { name: 'Users', path: '/users' },
-    { name: 'HWM & Reports', path: '/reports' },
+    { name: 'Reports / Ledger', path: '/reports' },
+    { name: 'Settings', path: '/settings' },
   ];
 
   return (

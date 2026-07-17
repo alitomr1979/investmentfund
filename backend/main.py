@@ -33,18 +33,80 @@ def get_fund_status(db: Session = Depends(get_db)):
 
 @app.post("/fund-status/update-value", response_model=schemas.FundStatusResponse)
 def update_fund_value(payload: schemas.FundStatusBase, db: Session = Depends(get_db)):
+    import yfinance as yf
+    import pandas as pd
+    import datetime
+    
     status = db.query(models.FundStatus).order_by(models.FundStatus.id.desc()).first()
     if not status:
         status = models.FundStatus(total_value=Decimal("0.0"), total_units=Decimal("0.0"), nav_per_unit=Decimal("100.0"))
     
     new_nav = payload.total_value / status.total_units if status.total_units > Decimal("0.0") else Decimal("100.0")
+    effective_date = datetime.datetime.strptime(payload.effective_date, "%Y-%m-%d")
     
     new_status = models.FundStatus(
         total_value=payload.total_value,
         total_units=status.total_units,
-        nav_per_unit=new_nav
+        nav_per_unit=new_nav,
+        last_updated=effective_date
     )
     db.add(new_status)
+    db.flush()
+    
+    manager = db.query(models.User).filter(models.User.role == "admin").first()
+    investors = db.query(models.User).filter(models.User.role == "investor", models.User.total_units > 0).all()
+    
+    if manager and investors:
+        earliest_date = min(user.hwm_date for user in investors).strftime('%Y-%m-%d')
+        try:
+            spy = yf.download("SPY", start=earliest_date, end=payload.effective_date, progress=False)
+            if not spy.empty:
+                spy.index = pd.to_datetime(spy.index).tz_localize(None)
+                spy_end_val = Decimal(str(spy["Close"].iloc[-1].item()))
+                
+                for user in investors:
+                    if user.performance_fee_percentage <= Decimal("0.0"):
+                        continue
+                        
+                    user_hwm_ts = pd.to_datetime(user.hwm_date).tz_localize(None)
+                    valid_spy_starts = spy[spy.index >= user_hwm_ts]
+                    
+                    if valid_spy_starts.empty:
+                        spy_start_val = spy_end_val
+                    else:
+                        spy_start_val = Decimal(str(valid_spy_starts["Close"].iloc[0].item()))
+                        
+                    spy_return = (spy_end_val - spy_start_val) / spy_start_val
+                    hurdle_price = user.high_water_mark * (Decimal("1.0") + spy_return)
+                    
+                    if new_nav > hurdle_price:
+                        excess_profit_per_unit = new_nav - hurdle_price
+                        total_fiat_fee = excess_profit_per_unit * user.total_units * user.performance_fee_percentage
+                        fee_units = total_fiat_fee / new_nav
+                        
+                        user.total_units -= fee_units
+                        manager.total_units += fee_units
+                        
+                        old_hwm = user.high_water_mark
+                        user.high_water_mark = new_nav
+                        user.hwm_date = effective_date
+                        
+                        fee_ledger = models.FeeLedger(
+                            user_id=user.id,
+                            manager_id=manager.id,
+                            old_hwm=old_hwm,
+                            new_nav=new_nav,
+                            spy_return=spy_return,
+                            fund_return=(new_nav - old_hwm) / old_hwm,
+                            excess_return=(new_nav - hurdle_price) / old_hwm,
+                            units_transferred=fee_units,
+                            created_at=effective_date
+                        )
+                        db.add(fee_ledger)
+        except Exception as e:
+            print("Error processing SPY data", e)
+
+    # Note: total_units might have changed due to fee transfers, but overall fund units remain the same.
     db.commit()
     db.refresh(new_status)
     return new_status
@@ -80,6 +142,15 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+@app.put("/users/{user_id}/fee")
+def update_user_fee(user_id: int, payload: schemas.UserFeeUpdate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.performance_fee_percentage = payload.performance_fee_percentage
+    db.commit()
+    return {"status": "success", "new_fee_percentage": user.performance_fee_percentage}
 
 @app.post("/transactions", response_model=schemas.TransactionResponse)
 def create_transaction(tx: schemas.TransactionBase, db: Session = Depends(get_db)):
@@ -141,99 +212,72 @@ def create_transaction(tx: schemas.TransactionBase, db: Session = Depends(get_db
     
     return db_tx
 
-@app.get("/transactions", response_model=list[schemas.TransactionResponse])
-def get_transactions(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(models.Transaction).order_by(models.Transaction.id.desc()).offset(skip).limit(limit).all()
+@app.get("/transactions", response_model=list[schemas.EnrichedTransactionResponse])
+def get_transactions(skip: int = 0, limit: int = 25, db: Session = Depends(get_db)):
+    txs = db.query(models.Transaction).order_by(models.Transaction.effective_date.desc(), models.Transaction.id.desc()).offset(skip).limit(limit).all()
+    
+    enriched = []
+    for tx in txs:
+        user = db.query(models.User).filter(models.User.id == tx.user_id).first()
+        
+        deposits = db.query(models.Transaction).filter(models.Transaction.user_id == tx.user_id, models.Transaction.transaction_type == "deposit", models.Transaction.id <= tx.id).all()
+        withdrawals = db.query(models.Transaction).filter(models.Transaction.user_id == tx.user_id, models.Transaction.transaction_type == "withdrawal", models.Transaction.id <= tx.id).all()
+        fees = db.query(models.FeeLedger).filter(models.FeeLedger.user_id == tx.user_id, models.FeeLedger.created_at <= tx.effective_date).all()
+        
+        total_units = sum(d.units_transacted for d in deposits) - sum(w.units_transacted for w in withdrawals) - sum(f.units_transferred for f in fees)
+        running_units = Decimal(str(total_units)) if total_units else Decimal("0.0")
+        running_fiat = running_units * tx.nav_at_transaction
+        
+        enriched.append({
+            "id": tx.id,
+            "user_id": tx.user_id,
+            "transaction_type": tx.transaction_type,
+            "amount_fiat": tx.amount_fiat,
+            "effective_date": tx.effective_date,
+            "units_transacted": tx.units_transacted,
+            "nav_at_transaction": tx.nav_at_transaction,
+            "system_timestamp": tx.system_timestamp,
+            "investor_name": user.name if user else "Unknown",
+            "running_balance_units": running_units,
+            "running_balance_fiat": running_fiat
+        })
+        
+    return enriched
 
-@app.get("/users/{user_id}/transactions", response_model=list[schemas.TransactionResponse])
-def get_user_transactions(user_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+@app.get("/users/{user_id}/transactions", response_model=list[schemas.EnrichedTransactionResponse])
+def get_user_transactions(user_id: int, skip: int = 0, limit: int = 25, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return db.query(models.Transaction).filter(models.Transaction.user_id == user_id).order_by(models.Transaction.id.desc()).offset(skip).limit(limit).all()
+        
+    txs = db.query(models.Transaction).filter(models.Transaction.user_id == user_id).order_by(models.Transaction.effective_date.desc(), models.Transaction.id.desc()).offset(skip).limit(limit).all()
+    
+    enriched = []
+    for tx in txs:
+        deposits = db.query(models.Transaction).filter(models.Transaction.user_id == tx.user_id, models.Transaction.transaction_type == "deposit", models.Transaction.id <= tx.id).all()
+        withdrawals = db.query(models.Transaction).filter(models.Transaction.user_id == tx.user_id, models.Transaction.transaction_type == "withdrawal", models.Transaction.id <= tx.id).all()
+        fees = db.query(models.FeeLedger).filter(models.FeeLedger.user_id == tx.user_id, models.FeeLedger.created_at <= tx.effective_date).all()
+        
+        total_units = sum(d.units_transacted for d in deposits) - sum(w.units_transacted for w in withdrawals) - sum(f.units_transferred for f in fees)
+        running_units = Decimal(str(total_units)) if total_units else Decimal("0.0")
+        running_fiat = running_units * tx.nav_at_transaction
+        
+        enriched.append({
+            "id": tx.id,
+            "user_id": tx.user_id,
+            "transaction_type": tx.transaction_type,
+            "amount_fiat": tx.amount_fiat,
+            "effective_date": tx.effective_date,
+            "units_transacted": tx.units_transacted,
+            "nav_at_transaction": tx.nav_at_transaction,
+            "system_timestamp": tx.system_timestamp,
+            "investor_name": user.name,
+            "running_balance_units": running_units,
+            "running_balance_fiat": running_fiat
+        })
+        
+    return enriched
 
-@app.post("/evaluate-performance")
-def evaluate_performance(req: schemas.FeeEvaluationRequest, db: Session = Depends(get_db)):
-    import yfinance as yf
-    import pandas as pd
-    import datetime
-    
-    manager = db.query(models.User).filter(models.User.id == req.manager_id, models.User.role == "admin").first()
-    if not manager:
-        raise HTTPException(status_code=404, detail="Manager not found")
-        
-    status = db.query(models.FundStatus).order_by(models.FundStatus.id.desc()).first()
-    if not status:
-        raise HTTPException(status_code=400, detail="Fund has no status")
-        
-    current_nav = status.nav_per_unit
-    
-    investors = db.query(models.User).filter(models.User.role == "investor", models.User.total_units > 0).all()
-    if not investors:
-        return {"message": "No investors to evaluate"}
-        
-    earliest_date = min(user.hwm_date for user in investors).strftime('%Y-%m-%d')
-    end_date_parsed = datetime.datetime.strptime(req.end_date, "%Y-%m-%d")
-    
-    # Fetch SPY data
-    try:
-        spy = yf.download("SPY", start=earliest_date, end=req.end_date, progress=False)
-        if spy.empty:
-            raise ValueError("Not enough SPY data for the given dates")
-        spy.index = pd.to_datetime(spy.index).tz_localize(None)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch SPY data: {str(e)}")
-        
-    spy_end_val = Decimal(str(spy["Close"].iloc[-1].item()))
-    
-    fee_records = []
-    for user in investors:
-        if current_nav > user.high_water_mark:
-            user_hwm_ts = pd.to_datetime(user.hwm_date).tz_localize(None)
-            valid_spy_starts = spy[spy.index >= user_hwm_ts]
-            
-            if valid_spy_starts.empty:
-                # Fallback to the latest available if HWM date is very recent
-                spy_start_val = spy_end_val
-            else:
-                spy_start_val = Decimal(str(valid_spy_starts["Close"].iloc[0].item()))
-                
-            spy_return = (spy_end_val - spy_start_val) / spy_start_val
-            fund_return = (current_nav - user.high_water_mark) / user.high_water_mark
-            excess_return = fund_return - spy_return
-            
-            if excess_return > Decimal("0.0"):
-                profit_excess_per_unit = excess_return * user.high_water_mark
-                fee_per_unit = profit_excess_per_unit * user.performance_fee_percentage
-                total_fee_fiat = fee_per_unit * user.total_units
-                units_to_transfer = total_fee_fiat / current_nav
-                
-                # Perform the transfer
-                user.total_units -= units_to_transfer
-                manager.total_units += units_to_transfer
-                
-                old_hwm = user.high_water_mark
-                user.high_water_mark = current_nav
-                user.hwm_date = end_date_parsed
-                
-                fee_ledger = models.FeeLedger(
-                    user_id=user.id,
-                    manager_id=manager.id,
-                    old_hwm=old_hwm,
-                    new_nav=current_nav,
-                    spy_return=spy_return,
-                    fund_return=fund_return,
-                    excess_return=excess_return,
-                    units_transferred=units_to_transfer
-                )
-                db.add(fee_ledger)
-                fee_records.append(fee_ledger)
-                
-    db.commit()
-    for record in fee_records:
-        db.refresh(record)
-        
-    return {"message": "Evaluation completed", "fees_charged": len(fee_records)}
 
 @app.get("/fee-ledger", response_model=list[schemas.FeeLedgerResponse])
 def get_fee_ledger(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):

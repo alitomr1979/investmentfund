@@ -4,6 +4,10 @@ from decimal import Decimal
 
 class FundStatusBase(BaseModel):
     total_value: Decimal
+    effective_date: str # YYYY-MM-DD
+
+class UserFeeUpdate(BaseModel):
+    performance_fee_percentage: Decimal
 
 class FundStatusResponse(BaseModel):
     id: int
@@ -44,6 +48,14 @@ class TransactionResponse(TransactionBase):
     system_timestamp: datetime
     effective_date: datetime
 
+    class Config:
+        from_attributes = True
+
+class EnrichedTransactionResponse(TransactionResponse):
+    investor_name: str
+    running_balance_units: Decimal
+    running_balance_fiat: Decimal
+    
     class Config:
         from_attributes = True
 
