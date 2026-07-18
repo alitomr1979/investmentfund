@@ -6,9 +6,14 @@ export default function Layout({ children, user, onLogout }) {
   
   const navItems = [
     { name: 'Dashboard', path: '/' },
+    { name: 'Executive Dashboard', path: '/executive' },
     { name: 'Transactions', path: '/transactions' },
+    { name: 'Capital Statement', path: '/statement' },
     { name: 'Users', path: '/users' },
-    { name: 'Reports / Ledger', path: '/reports' },
+    { name: 'Fee Ledger', path: '/reports' },
+    { name: 'NAV History', path: '/nav-history' },
+    { name: 'Fund Performance', path: '/fund-performance' },
+    { name: 'Investor Performance', path: '/investor-performance' },
     { name: 'Settings', path: '/settings' },
   ];
 

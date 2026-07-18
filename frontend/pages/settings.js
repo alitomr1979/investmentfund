@@ -28,7 +28,7 @@ export default function Settings({ user, users, reload, onLogout, API_BASE }) {
     }
   };
 
-  const investors = users.filter(u => u.role === 'investor');
+  const investors = users;
 
   return (
     <Layout user={user} onLogout={onLogout}>

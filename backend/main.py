@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 import models, schemas
 from database import engine, get_db
+import calculation_engine
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -33,8 +34,6 @@ def get_fund_status(db: Session = Depends(get_db)):
 
 @app.post("/fund-status/update-value", response_model=schemas.FundStatusResponse)
 def update_fund_value(payload: schemas.FundStatusBase, db: Session = Depends(get_db)):
-    import yfinance as yf
-    import pandas as pd
     import datetime
     
     status = db.query(models.FundStatus).order_by(models.FundStatus.id.desc()).first()
@@ -53,60 +52,8 @@ def update_fund_value(payload: schemas.FundStatusBase, db: Session = Depends(get
     db.add(new_status)
     db.flush()
     
-    manager = db.query(models.User).filter(models.User.role == "admin").first()
-    investors = db.query(models.User).filter(models.User.role == "investor", models.User.total_units > 0).all()
+    calculation_engine.process_hwm_fees(db, effective_date, new_nav)
     
-    if manager and investors:
-        earliest_date = min(user.hwm_date for user in investors).strftime('%Y-%m-%d')
-        try:
-            spy = yf.download("SPY", start=earliest_date, end=payload.effective_date, progress=False)
-            if not spy.empty:
-                spy.index = pd.to_datetime(spy.index).tz_localize(None)
-                spy_end_val = Decimal(str(spy["Close"].iloc[-1].item()))
-                
-                for user in investors:
-                    if user.performance_fee_percentage <= Decimal("0.0"):
-                        continue
-                        
-                    user_hwm_ts = pd.to_datetime(user.hwm_date).tz_localize(None)
-                    valid_spy_starts = spy[spy.index >= user_hwm_ts]
-                    
-                    if valid_spy_starts.empty:
-                        spy_start_val = spy_end_val
-                    else:
-                        spy_start_val = Decimal(str(valid_spy_starts["Close"].iloc[0].item()))
-                        
-                    spy_return = (spy_end_val - spy_start_val) / spy_start_val
-                    hurdle_price = user.high_water_mark * (Decimal("1.0") + spy_return)
-                    
-                    if new_nav > hurdle_price:
-                        excess_profit_per_unit = new_nav - hurdle_price
-                        total_fiat_fee = excess_profit_per_unit * user.total_units * user.performance_fee_percentage
-                        fee_units = total_fiat_fee / new_nav
-                        
-                        user.total_units -= fee_units
-                        manager.total_units += fee_units
-                        
-                        old_hwm = user.high_water_mark
-                        user.high_water_mark = new_nav
-                        user.hwm_date = effective_date
-                        
-                        fee_ledger = models.FeeLedger(
-                            user_id=user.id,
-                            manager_id=manager.id,
-                            old_hwm=old_hwm,
-                            new_nav=new_nav,
-                            spy_return=spy_return,
-                            fund_return=(new_nav - old_hwm) / old_hwm,
-                            excess_return=(new_nav - hurdle_price) / old_hwm,
-                            units_transferred=fee_units,
-                            created_at=effective_date
-                        )
-                        db.add(fee_ledger)
-        except Exception as e:
-            print("Error processing SPY data", e)
-
-    # Note: total_units might have changed due to fee transfers, but overall fund units remain the same.
     db.commit()
     db.refresh(new_status)
     return new_status
@@ -289,76 +236,52 @@ def get_user_fees(user_id: int, skip: int = 0, limit: int = 100, db: Session = D
 
 @app.get("/reports/investors-summary", response_model=schemas.InvestorsSummaryResponse)
 def get_investors_summary(db: Session = Depends(get_db)):
-    import datetime
-    from dateutil.relativedelta import relativedelta
-    
-    now = datetime.datetime.utcnow()
-    date_3m = now - relativedelta(months=3)
-    date_1y = now - relativedelta(years=1)
-    
-    def get_units_at_date(investor_id, target_date):
-        deposits = db.query(models.Transaction).filter(models.Transaction.user_id == investor_id, models.Transaction.transaction_type == "deposit", models.Transaction.effective_date <= target_date).all()
-        withdrawals = db.query(models.Transaction).filter(models.Transaction.user_id == investor_id, models.Transaction.transaction_type == "withdrawal", models.Transaction.effective_date <= target_date).all()
-        fees = db.query(models.FeeLedger).filter(models.FeeLedger.user_id == investor_id, models.FeeLedger.created_at <= target_date).all()
-        total = sum(d.units_transacted for d in deposits) - sum(w.units_transacted for w in withdrawals) - sum(f.units_transferred for f in fees)
-        return Decimal(str(total)) if total else Decimal("0.0")
+    return calculation_engine.get_investors_summary(db)
 
-    def get_nav_at_date(target_date):
-        status = db.query(models.FundStatus).filter(models.FundStatus.last_updated <= target_date).order_by(models.FundStatus.id.desc()).first()
-        if status:
-            return status.nav_per_unit
-        first_status = db.query(models.FundStatus).order_by(models.FundStatus.id.asc()).first()
-        return first_status.nav_per_unit if first_status else Decimal("100.0")
+@app.get("/reports/executive-dashboard")
+def executive_dashboard(db: Session = Depends(get_db)):
+    data = calculation_engine.get_executive_dashboard(db)
+    if not data:
+        raise HTTPException(status_code=400, detail="Not enough data")
+    return data
 
-    def calculate_dietz(investor_id, start_date, end_date, v_end):
-        v_start = get_units_at_date(investor_id, start_date) * get_nav_at_date(start_date)
-        cash_flows = db.query(models.Transaction).filter(
-            models.Transaction.user_id == investor_id,
-            models.Transaction.effective_date > start_date,
-            models.Transaction.effective_date <= end_date
-        ).all()
-        
-        net_cf = Decimal("0.0")
-        weighted_cf = Decimal("0.0")
-        total_days = Decimal(max((end_date - start_date).days, 1))
-        
-        for cf in cash_flows:
-            amount = cf.amount_fiat if cf.transaction_type == "deposit" else -cf.amount_fiat
-            net_cf += amount
-            weight = Decimal(max((end_date - cf.effective_date).days, 0)) / total_days
-            weighted_cf += amount * weight
-            
-        denominator = v_start + weighted_cf
-        if denominator == Decimal("0.0"):
-            return Decimal("0.0")
-        return (v_end - v_start - net_cf) / denominator
+@app.get("/reports/investor-statement/{user_id}")
+def investor_statement(user_id: int, db: Session = Depends(get_db)):
+    data = calculation_engine.get_investor_statement(db, user_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Investor not found")
+    return data
 
-    current_nav = get_nav_at_date(now)
-    nav_3m = get_nav_at_date(date_3m)
-    nav_1y = get_nav_at_date(date_1y)
-    
-    fund_gross_3m = (current_nav / nav_3m) - Decimal("1.0") if nav_3m > Decimal("0.0") else Decimal("0.0")
-    fund_gross_1y = (current_nav / nav_1y) - Decimal("1.0") if nav_1y > Decimal("0.0") else Decimal("0.0")
-    
-    investors = db.query(models.User).filter(models.User.role == "investor").all()
-    summary_list = []
-    
-    for inv in investors:
-        current_amount = inv.total_units * current_nav
-        net_return_3m = calculate_dietz(inv.id, date_3m, now, current_amount)
-        net_return_1y = calculate_dietz(inv.id, date_1y, now, current_amount)
-        
-        summary_list.append({
-            "investor_name": inv.name,
-            "total_amount": current_amount,
-            "last_quarter": {
-                "fund_gross_return": fund_gross_3m,
-                "investor_net_return": net_return_3m
-            },
-            "last_year": {
-                "fund_gross_return": fund_gross_1y,
-                "investor_net_return": net_return_1y
-            }
-        })
-        
-    return {"summary": summary_list}
+import datetime
+from typing import Optional
+
+@app.get("/reports/nav-history")
+def nav_history(start_date: Optional[str] = None, end_date: Optional[str] = None, db: Session = Depends(get_db)):
+    sd = datetime.datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    ed = datetime.datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+    data = calculation_engine.get_nav_history(db, sd, ed)
+    return data
+
+@app.get("/reports/fund-performance")
+def fund_performance(db: Session = Depends(get_db)):
+    data = calculation_engine.get_fund_performance_report(db)
+    if not data:
+        raise HTTPException(status_code=400, detail="Not enough data")
+    return data
+
+@app.get("/reports/investor-performance")
+def investor_performance_list(db: Session = Depends(get_db)):
+    users = db.query(models.User).filter(models.User.total_units > 0).all()
+    results = []
+    for u in users:
+        rep = calculation_engine.get_investor_performance_report(db, u.id)
+        if rep:
+            results.append(rep)
+    return results
+
+@app.get("/reports/investor-performance/{user_id}")
+def investor_performance_single(user_id: int, db: Session = Depends(get_db)):
+    data = calculation_engine.get_investor_performance_report(db, user_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Investor not found or not enough data")
+    return data

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+node_modules/
+.next/
+*.md
+*.txt
+*.ps1
+backend/patch*.py
