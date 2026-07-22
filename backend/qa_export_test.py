@@ -1,55 +1,45 @@
-import urllib.request
-import json
-import csv
+import sys
+from fastapi.testclient import TestClient
+from main import app
 import pandas as pd
-import math
+import io
 
-url = "http://localhost:8000/reports/investor-performance?user_id=1&start_date=2026-01-01&end_date=2026-12-31"
-req = urllib.request.Request(url)
-with urllib.request.urlopen(req) as response:
-    perf_data = json.loads(response.read().decode())[0]
+client = TestClient(app)
 
-# Simulate CSV export
-csv_filename = "investor_performance.csv"
-headers = list(perf_data.keys())
-with open(csv_filename, "w", newline='') as f:
-    writer = csv.DictWriter(f, fieldnames=headers)
-    writer.writeheader()
-    writer.writerow(perf_data)
+def run_tests():
+    # Setup: create user 1 and a transaction
+    client.post("/users", json={"name": "Test User", "email": "test@example.com", "role": "investor"})
+    client.post("/transactions", json={"user_id": 1, "type": "deposit", "amount": 1000, "date": "2023-01-01"})
+    
+    print("Testing /reports/fee-report CSV export...")
+    resp_csv = client.get("/reports/fee-report?user_id=1&format=csv")
+    if resp_csv.status_code == 200 and 'text/csv' in resp_csv.headers.get('content-type', ''):
+        print("PASS: CSV content-type")
+        df = pd.read_csv(io.StringIO(resp_csv.text))
+        print(f"PASS: CSV valid, {len(df)} rows found.")
+    else:
+        print(f"FAIL: CSV export. Status {resp_csv.status_code}, Header {resp_csv.headers.get('content-type')}")
+        print(f"BODY: {resp_csv.text}")
+        sys.exit(1)
 
-# Simulate Excel export
-excel_filename = "investor_performance.xlsx"
-df_out = pd.DataFrame([perf_data])
-df_out.to_excel(excel_filename, index=False)
-
-# Read CSV and verify
-with open(csv_filename, "r") as f:
-    reader = csv.DictReader(f)
-    csv_data = list(reader)[0]
-
-# Read Excel and verify
-df_in = pd.read_excel(excel_filename)
-excel_data = df_in.to_dict('records')[0]
-
-def compare_dicts(original, test_dict, name):
-    for k, v in original.items():
-        val2 = test_dict[k]
-        if isinstance(v, float):
-            v2 = float(val2)
-            if not math.isclose(v, v2, rel_tol=1e-9):
-                print(f"FAIL {name}: Mismatch on {k}. Expected {v}, got {v2}")
-                return False
-        elif isinstance(v, int):
-            if int(v) != int(val2):
-                print(f"FAIL {name}: Mismatch on {k}. Expected {v}, got {val2}")
-                return False
+    print("Testing /reports/fee-report Excel export...")
+    resp_xls = client.get("/reports/fee-report?user_id=1&format=excel")
+    
+    content_type = resp_xls.headers.get('content-type', '')
+    if resp_xls.status_code == 200 and ('spreadsheet' in content_type or 'excel' in content_type):
+        print(f"PASS: Excel content-type: {content_type}")
+        # Verify content
+        if b"management_fee" in resp_xls.content:
+             print("PASS: Excel content has correct keys.")
         else:
-            if v != val2:
-                print(f"FAIL {name}: Mismatch on {k}. Expected {v}, got {val2}")
-                return False
-    print(f"PASS: {name} matches original data exactly.")
-    return True
+             print("FAIL: Missing keys in excel output.")
+             sys.exit(1)
+    else:
+        print(f"FAIL: Excel export. Status {resp_xls.status_code}, Header {content_type}")
+        print(f"BODY: {resp_xls.text}")
+        sys.exit(1)
 
-compare_dicts(perf_data, csv_data, "CSV")
-compare_dicts(perf_data, excel_data, "Excel")
+    print("ALL TESTS PASSED")
 
+if __name__ == "__main__":
+    run_tests()

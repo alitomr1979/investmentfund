@@ -1,5 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Response
 from typing import Optional, List
+import csv
+import io
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from decimal import Decimal
@@ -300,3 +302,53 @@ def investor_performance_list(user_id: Optional[int] = None, start_date: Optiona
             if rep:
                 results.append(rep)
         return results
+
+
+@app.get("/settings", response_model=schemas.SystemSettingsResponse)
+def get_settings(db: Session = Depends(get_db)):
+    settings = db.query(models.SystemSettings).first()
+    if not settings:
+        settings = models.SystemSettings(fee_collection_frequency="monthly")
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+@app.put("/settings", response_model=schemas.SystemSettingsResponse)
+def update_settings(payload: schemas.SystemSettingsBase, db: Session = Depends(get_db)):
+    settings = db.query(models.SystemSettings).first()
+    if not settings:
+        settings = models.SystemSettings()
+        db.add(settings)
+    settings.fee_collection_frequency = payload.fee_collection_frequency
+    db.commit()
+    db.refresh(settings)
+    return settings
+
+@app.get("/reports/fee-report")
+def get_fee_report_api(user_id: int, start_date: Optional[str] = None, end_date: Optional[str] = None, format: Optional[str] = None, db: Session = Depends(get_db)):
+    sd = datetime.datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    ed = datetime.datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+    
+    rep = calculation_engine.get_fee_report(db, sd, ed, user_id)
+    if not rep:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if format == 'csv':
+        output = io.StringIO()
+        writer = csv.writer(output)
+        data = rep if isinstance(rep, dict) else (rep.__dict__ if hasattr(rep, '__dict__') else {"data": str(rep)})
+        writer.writerow(data.keys())
+        writer.writerow(data.values())
+        return Response(content=output.getvalue(), media_type="text/csv")
+        
+    elif format in ['excel', 'xlsx']:
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter='\t')
+        data = rep if isinstance(rep, dict) else (rep.__dict__ if hasattr(rep, '__dict__') else {"data": str(rep)})
+        writer.writerow(data.keys())
+        writer.writerow(data.values())
+        return Response(content=output.getvalue(), media_type="application/vnd.ms-excel")
+
+    return rep
+

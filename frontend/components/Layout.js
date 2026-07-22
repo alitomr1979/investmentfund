@@ -11,6 +11,7 @@ export default function Layout({ children, user, onLogout }) {
     { name: 'Capital Statement', path: '/statement' },
     { name: 'Users', path: '/users' },
     { name: 'Fee Ledger', path: '/reports' },
+    { name: 'Fee Report', path: '/fee-report' },
     { name: 'NAV History', path: '/nav-history' },
     { name: 'Fund Performance', path: '/fund-performance' },
     { name: 'Investor Performance', path: '/investor-performance' },
@@ -24,7 +25,12 @@ export default function Layout({ children, user, onLogout }) {
           Elite Fund
         </h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          {navItems.map(item => (
+          {navItems.map(item => {
+            // Hide some admin-only links for investors if necessary
+            if (user?.role !== 'admin' && (item.path === '/executive' || item.path === '/users' || item.path === '/settings' || item.path === '/fee-report')) {
+              return null;
+            }
+            return (
             <Link key={item.path} href={item.path} style={{
               color: router.pathname === item.path ? 'var(--accent)' : 'var(--text-muted)',
               textDecoration: 'none',
@@ -36,7 +42,7 @@ export default function Layout({ children, user, onLogout }) {
             }}>
               {item.name}
             </Link>
-          ))}
+          )})}
         </div>
       </nav>
       <main style={{ flex: 1, padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>

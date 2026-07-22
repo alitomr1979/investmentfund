@@ -2,6 +2,14 @@ from pydantic import BaseModel
 from datetime import datetime
 from decimal import Decimal
 
+class SystemSettingsBase(BaseModel):
+    fee_collection_frequency: str
+
+class SystemSettingsResponse(SystemSettingsBase):
+    id: int
+    class Config:
+        from_attributes = True
+
 class FundStatusBase(BaseModel):
     total_value: Decimal
     effective_date: str # YYYY-MM-DD
@@ -90,3 +98,21 @@ class InvestorSummary(BaseModel):
 
 class InvestorsSummaryResponse(BaseModel):
     summary: list[InvestorSummary]
+
+class FeeReportTransaction(BaseModel):
+    id: int
+    user_id: int
+    units_transferred: Decimal
+    fee_usd: Decimal
+    created_at: datetime
+
+class FeeReportResponse(BaseModel):
+    hwm_nav: Decimal
+    hwm_date: datetime | None
+    management_fee: Decimal
+    performance_fee_percentage: Decimal
+    paid_fees_units: Decimal
+    paid_fees_usd: Decimal
+    accrued_fees_usd: Decimal
+    net_return_after_fees: Decimal
+    last_30_days_fees: list[FeeReportTransaction]

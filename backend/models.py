@@ -12,6 +12,12 @@ class TransactionTypeEnum(str, enum.Enum):
     deposit = "deposit"
     withdrawal = "withdrawal"
 
+class SystemSettings(Base):
+    __tablename__ = "system_settings"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    fee_collection_frequency = Column(String, default="monthly") # 'monthly', 'quarterly', 'annual'
+
 class User(Base):
     __tablename__ = "users"
     
