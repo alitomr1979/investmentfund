@@ -25,9 +25,6 @@ def reset_database(keep_users: bool = False):
         print("Clearing Fee Ledger...")
         db.query(models.FeeLedger).delete()
         
-        print("Clearing Audit Logs...")
-        db.query(models.AuditLog).delete()
-        
         print("Clearing Transactions...")
         db.query(models.Transaction).delete()
         
