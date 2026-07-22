@@ -232,29 +232,48 @@ def get_executive_dashboard(db: Session):
         }
     }
 
-def get_investor_statement(db: Session, user_id: int):
+def get_investor_statement(db: Session, user_id: int, start_date: datetime.datetime = None, end_date: datetime.datetime = None):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         return None
         
     now = datetime.datetime.utcnow()
-    current_nav = get_nav_at_date(db, now)
+    effective_end_date = end_date or now
     
-    deposits = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "deposit").all()
-    withdrawals = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "withdrawal").all()
-    fees = db.query(models.FeeLedger).filter(models.FeeLedger.user_id == user_id).all()
+    current_nav = get_nav_at_date(db, effective_end_date)
+    
+    dep_query = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "deposit")
+    with_query = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "withdrawal")
+    fee_query = db.query(models.FeeLedger).filter(models.FeeLedger.user_id == user_id)
+    
+    if start_date:
+        dep_query = dep_query.filter(models.Transaction.effective_date >= start_date)
+        with_query = with_query.filter(models.Transaction.effective_date >= start_date)
+        fee_query = fee_query.filter(models.FeeLedger.created_at >= start_date)
+    if end_date:
+        dep_query = dep_query.filter(models.Transaction.effective_date <= end_date)
+        with_query = with_query.filter(models.Transaction.effective_date <= end_date)
+        fee_query = fee_query.filter(models.FeeLedger.created_at <= end_date)
+        
+    deposits = dep_query.all()
+    withdrawals = with_query.all()
+    fees = fee_query.all()
     
     total_contributions = sum(d.amount_fiat for d in deposits)
     total_withdrawals = sum(w.amount_fiat for w in withdrawals)
     
-    # Starting balance is 0 since this is a global statement.
     initial_balance = Decimal("0.0")
-    ending_balance = user.total_units * current_nav
+    if start_date:
+        initial_units = get_units_at_date(db, user_id, start_date - datetime.timedelta(seconds=1))
+        initial_nav = get_nav_at_date(db, start_date - datetime.timedelta(seconds=1))
+        initial_balance = initial_units * initial_nav
+        
+    ending_units = get_units_at_date(db, user_id, effective_end_date)
+    ending_balance = ending_units * current_nav
     
     total_fees_paid_units = sum(f.units_transferred for f in fees)
-    total_fees_paid_fiat = total_fees_paid_units * current_nav # Approx current value of fees paid
     
-    net_profit = ending_balance - total_contributions + total_withdrawals
+    net_profit = ending_balance - initial_balance - total_contributions + total_withdrawals
     
     return {
         "investor_name": user.name,
@@ -312,29 +331,51 @@ def get_fund_performance_report(db: Session):
         "dollar_return": dashboard["global_aum"] - (first_status.total_value if first_status else Decimal("0.0"))
     }
 
-def get_investor_performance_report(db: Session, user_id: int):
+def get_investor_performance_report(db: Session, user_id: int, start_date: datetime.datetime = None, end_date: datetime.datetime = None):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user: return None
     
-    end_date = datetime.datetime.utcnow()
-    deposits = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "deposit").all()
-    withdrawals = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "withdrawal").all()
+    now = datetime.datetime.utcnow()
+    effective_end_date = end_date or now
+    
+    dep_query = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "deposit")
+    with_query = db.query(models.Transaction).filter(models.Transaction.user_id == user_id, models.Transaction.transaction_type == "withdrawal")
+    
+    if start_date:
+        dep_query = dep_query.filter(models.Transaction.effective_date >= start_date)
+        with_query = with_query.filter(models.Transaction.effective_date >= start_date)
+    if end_date:
+        dep_query = dep_query.filter(models.Transaction.effective_date <= end_date)
+        with_query = with_query.filter(models.Transaction.effective_date <= end_date)
+        
+    deposits = dep_query.all()
+    withdrawals = with_query.all()
     
     total_contributions = sum(d.amount_fiat for d in deposits)
     total_withdrawals = sum(w.amount_fiat for w in withdrawals)
     
-    nav_at_end = get_nav_at_date(db, end_date)
-    ending_value = user.total_units * nav_at_end
+    beginning_value = Decimal("0.0")
+    start_calc_date = user.created_at
+    if start_date:
+        initial_units = get_units_at_date(db, user_id, start_date - datetime.timedelta(seconds=1))
+        initial_nav = get_nav_at_date(db, start_date - datetime.timedelta(seconds=1))
+        beginning_value = initial_units * initial_nav
+        start_calc_date = max(start_date, user.created_at)
+        
+    ending_units = get_units_at_date(db, user_id, effective_end_date)
+    nav_at_end = get_nav_at_date(db, effective_end_date)
+    ending_value = ending_units * nav_at_end
     
-    gain_loss = ending_value - total_contributions + total_withdrawals
-    total_return = (gain_loss / total_contributions) if total_contributions > Decimal("0.0") else Decimal("0.0")
+    gain_loss = ending_value - beginning_value - total_contributions + total_withdrawals
+    base_for_return = beginning_value + total_contributions
+    total_return = (gain_loss / base_for_return) if base_for_return > Decimal("0.0") else Decimal("0.0")
     
-    years = max((end_date - user.created_at).days / 365.25, 0.001)
+    years = max((effective_end_date - start_calc_date).days / 365.25, 0.001)
     annualized_return = ((Decimal("1.0") + total_return) ** Decimal(str(1 / years))) - Decimal("1.0")
     
     return {
         "investor_name": user.name,
-        "beginning_value": Decimal("0.0"),
+        "beginning_value": beginning_value,
         "ending_value": ending_value,
         "net_contributions": total_contributions,
         "net_withdrawals": total_withdrawals,

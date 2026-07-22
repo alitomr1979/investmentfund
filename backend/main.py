@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from decimal import Decimal
@@ -245,12 +246,24 @@ def executive_dashboard(db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Not enough data")
     return data
 
-@app.get("/reports/investor-statement/{user_id}")
-def investor_statement(user_id: int, db: Session = Depends(get_db)):
-    data = calculation_engine.get_investor_statement(db, user_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="Investor not found")
-    return data
+@app.get("/reports/investor-statement")
+def investor_statement(user_id: Optional[int] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, db: Session = Depends(get_db)):
+    sd = datetime.datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    ed = datetime.datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+    
+    if user_id:
+        data = calculation_engine.get_investor_statement(db, user_id, sd, ed)
+        if not data:
+            raise HTTPException(status_code=404, detail="Investor not found")
+        return [data]
+    else:
+        users = db.query(models.User).filter(models.User.total_units > 0).all()
+        results = []
+        for u in users:
+            rep = calculation_engine.get_investor_statement(db, u.id, sd, ed)
+            if rep:
+                results.append(rep)
+        return results
 
 import datetime
 from typing import Optional
@@ -270,18 +283,20 @@ def fund_performance(db: Session = Depends(get_db)):
     return data
 
 @app.get("/reports/investor-performance")
-def investor_performance_list(db: Session = Depends(get_db)):
-    users = db.query(models.User).filter(models.User.total_units > 0).all()
-    results = []
-    for u in users:
-        rep = calculation_engine.get_investor_performance_report(db, u.id)
-        if rep:
-            results.append(rep)
-    return results
-
-@app.get("/reports/investor-performance/{user_id}")
-def investor_performance_single(user_id: int, db: Session = Depends(get_db)):
-    data = calculation_engine.get_investor_performance_report(db, user_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="Investor not found or not enough data")
-    return data
+def investor_performance_list(user_id: Optional[int] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, db: Session = Depends(get_db)):
+    sd = datetime.datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    ed = datetime.datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+    
+    if user_id:
+        rep = calculation_engine.get_investor_performance_report(db, user_id, sd, ed)
+        if not rep:
+            raise HTTPException(status_code=404, detail="Investor not found or not enough data")
+        return [rep]
+    else:
+        users = db.query(models.User).filter(models.User.total_units > 0).all()
+        results = []
+        for u in users:
+            rep = calculation_engine.get_investor_performance_report(db, u.id, sd, ed)
+            if rep:
+                results.append(rep)
+        return results
