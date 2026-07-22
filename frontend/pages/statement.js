@@ -58,31 +58,33 @@ export default function Statement({ user, users, onLogout, API_BASE }) {
     }
   };
 
-  const formatUSD = (val) => `$${parseFloat(val).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  const formatUSD = (val) => `$${parseFloat(val || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  const formatPct = (val) => `${(parseFloat(val || 0) * 100).toFixed(2)}%`;
+  const formatNum = (val, decimals = 4) => parseFloat(val || 0).toFixed(decimals);
 
   const exportCSV = () => {
-    let csv = "Investor,Initial Balance,Total Contributions,Total Withdrawals,Net Profit,Ending Balance\n";
+    let csv = "Investor ID,Investor Name,Period,Beginning Balance,Contributions,Withdrawals,Allocated Profit/Loss,Ending Balance,Units Owned,Ownership %,NAV per Unit,Market Value,Return (%)\n";
     statements.forEach(r => {
-      csv += `"${r.investor_name}",${r.initial_balance},${r.total_contributions},${r.total_withdrawals},${r.net_profit},${r.ending_balance}\n`;
+      csv += `${r.investor_id},"${r.investor_name}","${r.reporting_period}",${r.initial_balance},${r.total_contributions},${r.total_withdrawals},${r.net_profit},${r.ending_balance},${r.units_owned},${r.ownership_percentage},${r.nav_per_unit},${r.market_value},${r.percentage_return}\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'investor_statement.csv';
+    a.download = 'investor_capital_statement.csv';
     a.click();
   };
   
   const exportExcel = () => {
-    let csv = "Investor\tInitial Balance\tTotal Contributions\tTotal Withdrawals\tNet Profit\tEnding Balance\n";
+    let csv = "Investor ID\tInvestor Name\tPeriod\tBeginning Balance\tContributions\tWithdrawals\tAllocated Profit/Loss\tEnding Balance\tUnits Owned\tOwnership %\tNAV per Unit\tMarket Value\tReturn (%)\n";
     statements.forEach(r => {
-      csv += `"${r.investor_name}"\t${r.initial_balance}\t${r.total_contributions}\t${r.total_withdrawals}\t${r.net_profit}\t${r.ending_balance}\n`;
+      csv += `${r.investor_id}\t"${r.investor_name}"\t"${r.reporting_period}"\t${r.initial_balance}\t${r.total_contributions}\t${r.total_withdrawals}\t${r.net_profit}\t${r.ending_balance}\t${r.units_owned}\t${r.ownership_percentage}\t${r.nav_per_unit}\t${r.market_value}\t${r.percentage_return}\n`;
     });
     const blob = new Blob([csv], { type: 'application/vnd.ms-excel' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'investor_statement.xls';
+    a.download = 'investor_capital_statement.xls';
     a.click();
   };
 
@@ -145,31 +147,44 @@ export default function Statement({ user, users, onLogout, API_BASE }) {
         <div className="glass-panel" style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
             <thead>
-              <tr style={{ borderBottom: '1px solid var(--glass-border)' }}>
+              <tr style={{ borderBottom: '1px solid var(--glass-border)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                 <th style={{ padding: '1rem' }}>Investor</th>
-                <th style={{ padding: '1rem' }}>Initial Balance</th>
+                <th style={{ padding: '1rem' }}>Period</th>
+                <th style={{ padding: '1rem' }}>Beginning Balance</th>
                 <th style={{ padding: '1rem' }}>Contributions</th>
                 <th style={{ padding: '1rem' }}>Withdrawals</th>
-                <th style={{ padding: '1rem' }}>Net Profit</th>
+                <th style={{ padding: '1rem' }}>Allocated Profit/Loss</th>
                 <th style={{ padding: '1rem' }}>Ending Balance</th>
+                <th style={{ padding: '1rem' }}>Units Owned</th>
+                <th style={{ padding: '1rem' }}>Ownership %</th>
+                <th style={{ padding: '1rem' }}>NAV / Unit</th>
+                <th style={{ padding: '1rem' }}>Return (%)</th>
               </tr>
             </thead>
             <tbody>
               {statements.map((r, idx) => (
-                <tr key={idx} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                  <td style={{ padding: '1rem' }}>{r.investor_name}</td>
+                <tr key={idx} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '0.9rem' }}>
+                  <td style={{ padding: '1rem', fontWeight: 'bold' }}>{r.investor_name}</td>
+                  <td style={{ padding: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>{r.reporting_period}</td>
                   <td style={{ padding: '1rem' }}>{formatUSD(r.initial_balance)}</td>
                   <td style={{ padding: '1rem', color: 'var(--success)' }}>+{formatUSD(r.total_contributions)}</td>
                   <td style={{ padding: '1rem', color: 'var(--danger)' }}>-{formatUSD(r.total_withdrawals)}</td>
-                  <td style={{ padding: '1rem', color: parseFloat(r.net_profit) >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+                  <td style={{ padding: '1rem', fontWeight: '600', color: parseFloat(r.net_profit) >= 0 ? 'var(--success)' : 'var(--danger)' }}>
                     {formatUSD(r.net_profit)}
                   </td>
                   <td style={{ padding: '1rem', fontWeight: 'bold' }}>{formatUSD(r.ending_balance)}</td>
+                  <td style={{ padding: '1rem' }}>{formatNum(r.units_owned, 4)}</td>
+                  <td style={{ padding: '1rem' }}>{formatPct(r.ownership_percentage / 100)}</td>
+                  <td style={{ padding: '1rem' }}>{formatUSD(r.nav_per_unit)}</td>
+                  <td style={{ padding: '1rem', fontWeight: 'bold', color: parseFloat(r.percentage_return) >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+                    {formatPct(r.percentage_return)}
+                  </td>
                 </tr>
               ))}
               {statements.length > 1 && selectedInvestor === 'all' && (
-                <tr style={{ borderTop: '2px solid var(--glass-border)', fontWeight: 'bold', background: 'rgba(255,255,255,0.02)' }}>
+                <tr style={{ borderTop: '2px solid var(--glass-border)', fontWeight: 'bold', background: 'rgba(255,255,255,0.03)', fontSize: '0.9rem' }}>
                   <td style={{ padding: '1rem' }}>GLOBAL TOTALS</td>
+                  <td style={{ padding: '1rem' }}>-</td>
                   <td style={{ padding: '1rem' }}>{formatUSD(totalInitial)}</td>
                   <td style={{ padding: '1rem', color: 'var(--success)' }}>+{formatUSD(totalContributions)}</td>
                   <td style={{ padding: '1rem', color: 'var(--danger)' }}>-{formatUSD(totalWithdrawals)}</td>
@@ -177,6 +192,10 @@ export default function Statement({ user, users, onLogout, API_BASE }) {
                     {formatUSD(totalNetProfit)}
                   </td>
                   <td style={{ padding: '1rem' }}>{formatUSD(totalEnding)}</td>
+                  <td style={{ padding: '1rem' }}>-</td>
+                  <td style={{ padding: '1rem' }}>100.00%</td>
+                  <td style={{ padding: '1rem' }}>-</td>
+                  <td style={{ padding: '1rem' }}>-</td>
                 </tr>
               )}
             </tbody>

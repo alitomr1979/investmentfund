@@ -275,14 +275,34 @@ def get_investor_statement(db: Session, user_id: int, start_date: datetime.datet
     
     net_profit = ending_balance - initial_balance - total_contributions + total_withdrawals
     
+    # Get total fund units at end_date for ownership percentage
+    status = db.query(models.FundStatus).filter(models.FundStatus.last_updated <= effective_end_date).order_by(models.FundStatus.id.desc()).first()
+    total_fund_units = status.total_units if status and status.total_units > Decimal("0.0") else Decimal("1.0")
+    ownership_pct = (ending_units / total_fund_units) * Decimal("100.0") if total_fund_units > Decimal("0.0") else Decimal("0.0")
+    
+    # Percentage Return
+    base_capital = initial_balance + total_contributions
+    pct_return = (net_profit / base_capital) if base_capital > Decimal("0.0") else Decimal("0.0")
+    
+    period_str = f"{start_date.strftime('%Y-%m-%d')} to {effective_end_date.strftime('%Y-%m-%d')}" if start_date else f"Inception to {effective_end_date.strftime('%Y-%m-%d')}"
+    
     return {
+        "investor_id": user.id,
         "investor_name": user.name,
+        "investor_email": user.email,
+        "reporting_period": period_str,
         "initial_balance": initial_balance,
         "total_contributions": total_contributions,
         "total_withdrawals": total_withdrawals,
         "net_profit": net_profit,
         "ending_balance": ending_balance,
-        "total_fees_paid_units": total_fees_paid_units
+        "units_owned": ending_units,
+        "ownership_percentage": ownership_pct,
+        "nav_per_unit": current_nav,
+        "market_value": ending_balance,
+        "total_fees_paid_units": total_fees_paid_units,
+        "total_return_usd": net_profit,
+        "percentage_return": pct_return
     }
 
 def get_nav_history(db: Session, start_date: datetime.datetime = None, end_date: datetime.datetime = None):
